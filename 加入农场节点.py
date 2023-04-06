@@ -1,7 +1,6 @@
 from pulp import *
 import time
 import pandas as pd
-import plotly as py
 import matplotlib as mpl
 
 mpl.rcParams['font.sans-serif'] = ['SimHei']
@@ -101,7 +100,7 @@ def get_data():
     # {('客户ID','回收中心'): ‘运输距离’'}
     cus_u_distance = {(1, 1): 191.8, (2, 1): 487.5, (3, 1): 181.4, (4, 1): 348.1}
     #
-    return customers, warehouses, plants, farms, products, recycles, customer_demands, farm_plant_distance, plant_wh_distance, wh_cust_distance, wh_cus_rot, cus_u_distance
+    return customers, warehouses, plants, farms, products, recycles, customer_demands, plant_product_info, farm_plant_distance, plant_wh_distance, wh_cust_distance, wh_cus_rot, cus_u_distance
 
 
 def optimal_location(number_of_whs, farms, warehouses, customers, plants, products, recycles, plant_product_info,
@@ -113,8 +112,8 @@ def optimal_location(number_of_whs, farms, warehouses, customers, plants, produc
     jade_problem = LpProblem("JADE", LpMinimize)
 
     # 增加从农场到工厂的运输决策变量
-    flow_vars_fp = LpVariable.dicts("flow_fp", [(f, p, k) for p in plants for f in farms for k in products
-                                                if (p, k) in plant_product_info.keys()], lowBound=0, cat='Continuous')
+    flow_vars_fp = LpVariable.dicts("flow_fp", [(f, p, k) for p in plants for f in farms for k in products], lowBound=0,
+                                    cat='Continuous')
     # 增加从工厂到仓库的运输决策变量
     flow_vars_pw = LpVariable.dicts("flow_pw", [(p, w, k) for p in plants for w in warehouses for k in products
                                                 if (p, k) in plant_product_info.keys()], lowBound=0, cat='Continuous')
@@ -137,7 +136,7 @@ def optimal_location(number_of_whs, farms, warehouses, customers, plants, produc
                                         lowBound=0, upBound=1, cat='Integer')
 
     # 约束
-    # 每个客户和每种产品都必须有至少一个仓库为其服务，不会出现某个客户的需求无法被任何仓库服务的情况。约束2.1
+    # 每个客户和每种产品都必须有至少一个仓库为其服务，   约束2.1
     for c in customers:
         for k in products:
             if customer_demands[c, k] > 0:
@@ -151,7 +150,8 @@ def optimal_location(number_of_whs, farms, warehouses, customers, plants, produc
                                  name=str(c) + '_' + str(k) + "_Capacity",
                                  rhs=sum([customer_demands[c, k] for c in customers for k in products if
                                           customer_demands[c, k] > 0]))
-
+    a = sum([customer_demands[c, k] for c in customers for k in products if customer_demands[c, k] > 0])
+    print(a)
     # 从仓库流出的产品总量必须等于从工厂流入该仓库的产品总量，确保所有从工厂流出的产品都能被送到客户手中(约束2.3)
     for w in warehouses:
         for k in products:
@@ -245,6 +245,9 @@ def optimal_location(number_of_whs, farms, warehouses, customers, plants, produc
                                      name=str(facility) + "_" + "Upper Bound",
                                      rhs=wh_status[w][2])
 
+
+
+
     # 要求农场在开放时，值为1，关闭时值为0
     for farm in farms:
         f = farm
@@ -275,6 +278,18 @@ def optimal_location(number_of_whs, farms, warehouses, customers, plants, produc
                                      sense=LpConstraintLE,
                                      name=str(c) + "_Single Source Constraint",
                                      rhs=1)
+    for p in plants:
+        for k in products:
+            jade_problem += LpConstraint(
+                e=lpSum([flow_vars_fp[f, p, k] for f in farms if (p, k) in plant_product_info.keys()]),
+                sense=LpConstraintLE,
+                name=str(p) + '_' + str(k) + "_Single Farm Source",
+                rhs=1)
+    for f in farms:
+        jade_problem += LpConstraint(e=lpSum([single_source_fp[f, p] for p in plants]),
+                                     sense=LpConstraintLE,
+                                     name=str(f) + "_Single Source Constraint 1",
+                                     rhs=1)
 
     # 非负约束
     for f in farms:
@@ -292,11 +307,7 @@ def optimal_location(number_of_whs, farms, warehouses, customers, plants, produc
                                              rhs=0)
 
     # 创建入站和出站成本以计算最低成本值
-    f_cost = {}  # 订货成本
-    for p in plants:
-        for f in farms:
-            f_cost[f, p] = float(a)
-
+    # 初始化成本
     f_p_cost = {}  # 农场工厂运输的单位运输成本
     for p in plants:
         for f in farms:
@@ -331,22 +342,14 @@ def optimal_location(number_of_whs, farms, warehouses, customers, plants, produc
     for c in customers:
         for u in recycles:
             c_u_cost[c, u] = ob_trans_cost * cus_u_distance[c, u]
-    for p in plants:
-        for f in farms:
-            for k in products:
-                if (p, k) in plant_product_info.keys():
-                    print("Type of f_cost[f, p]: ", type(f_cost[f, p]))
-                    print("Value of f_cost[f, p]: ", f_cost[f, p])
 
     # 设置目标函数
     # total_weighted_demand_objective = lpSum([flow_vars_pw[p, w, k]*ic_trans_cost*plant_wh_distance[p,w] for p in plants for w in warehouses for k in products if (p,k) in plant_product_info.keys()]) + lpSum([flow_vars_wc[w, c, k]*wh_cust_distance[w, c]*customer_demands[c, k]*ob_trans_cost for w in warehouses for c in customers for k in products])
     # 工厂向农场订货的订货成本+农场到工厂的运输成本+工厂到配送中心的运费+配送中心到客户的运费+配送中心到客户的变质成本+退回货物的运输成本
     v = 70  # 车辆平均速度
-    total_weighted_demand_objective = lpSum([
-        flow_vars_fp[f, p, k] * f_cost[f,p] for p in plants for f in farms for k in products if
-        (p, k) in plant_product_info.keys()]) + lpSum(
+    total_weighted_demand_objective = lpSum(
         [flow_vars_fp[f, p, k] * f_p_cost[f, p] * 1 / v for p in plants for f in farms for k in products if
-         (p, k) in plant_product_info.keys()]) + lpSum(
+         (f, k) in plant_product_info.keys()]) + lpSum(
         [flow_vars_pw[p, w, k] * p_w_cost[p, w] * 1 / v for p in plants for w in warehouses for k in products if
          (p, k) in plant_product_info.keys()]) + lpSum(
         [flow_vars_wc[w, c, k] * w_c_cost[w, c] * customer_demands[c, k] * 1 / v for w in warehouses for c in customers
@@ -362,8 +365,8 @@ def optimal_location(number_of_whs, farms, warehouses, customers, plants, produc
     jade_problem.solve()
 
     total_flow_fp = {(f, p, k): flow_vars_fp[f, p, k].varValue for p in plants for f in farms for k in products if
-                     (p, k) in plant_product_info.keys() and flow_vars_fp[f, p, k].varValue > 0}
-
+                     (f, k) in plant_product_info.keys() and flow_vars_fp[f, p, k].varValue > 0}
+    print(total_flow_fp)
     total_flow_pw = {(p, w, k): flow_vars_pw[p, w, k].varValue for p in plants for w in warehouses for k in products if
                      (p, k) in plant_product_info.keys() and flow_vars_pw[p, w, k].varValue > 0}
 
@@ -372,20 +375,6 @@ def optimal_location(number_of_whs, farms, warehouses, customers, plants, produc
 
     print('Status:' + LpStatus[jade_problem.status])
     print("Objective: " + str(jade_problem.objective.value()))
-    file.write('\nStatus:' + LpStatus[jade_problem.status])
-
-    total_demand = sum(customer_demands.values())
-    file.write("\nTotal Demand:" + str(total_demand))
-
-    file.write("\nObjective: " + str(jade_problem.objective.value()))
-
-    end_time = time.time()
-
-    time_diff = end_time - start_time
-
-    file.write("\nRun Time in seconds {:.1f}".format(time_diff))
-    print("Run Time in seconds {:.1f}".format(time_diff))
-
     # 准备数据写入excel表格
     opened_warehouses = []
     warehouse_list = []
@@ -427,14 +416,15 @@ def optimal_location(number_of_whs, farms, warehouses, customers, plants, produc
             '状态': farms[f][1],
             '农场所在城市': farms[f][2],
             '农场所在省份': farms[f][3],
-            '农场总运输量': total_demand_to_farm[f]
+            '农场总运输量': total_demand_to_farm[f],
+            '农场到工厂距离': farm_plant_diatance[f, p]
 
         }
         opened_farms.append(farm)
     df_wh = pd.DataFrame.from_records(opened_warehouses)
     df_wh = df_wh[['配送中心ID', '配送中心所在城市', '省份', '邮政编码', '配送中心的总需求']]
     df_fa = pd.DataFrame.from_records(opened_farms)
-    df_fa = df_fa[['农场', '农场名称', '状态', '农场所在城市', '农场所在省份', '农场总运输量']]
+    df_fa = df_fa[['农场', '农场名称', '状态', '农场所在城市', '农场所在省份', '农场总运输量', '农场到工厂距离']]
     # writing detailed files
     writer = pd.ExcelWriter(r"D:\桌面文件夹哦\四级供应链模型\模型求解\农场测试.xlsx")
     df_wh.to_excel(writer, '开放的配送中心', index=False)
@@ -457,6 +447,10 @@ def optimal_location(number_of_whs, farms, warehouses, customers, plants, produc
         customers_assignment.append(cust)
         if (w, c) not in maps_assign_wc:
             maps_assign_wc[w, c] = 1
+    df_cu = pd.DataFrame(customers_assignment, columns=['配送中心', '客户', '产品', '客户需求', '距离'])
+    df_cu_copy = df_cu.copy()
+    df_cu = df_cu[['配送中心', '客户', '产品', '客户需求', '距离']]
+    df_cu.to_excel(writer, '配送中心到客户的分配情况', index=False)
 
     plants_assignment = []
     maps_assign_pw = {}
@@ -475,43 +469,39 @@ def optimal_location(number_of_whs, farms, warehouses, customers, plants, produc
         plants_assignment.append(plant)
         if (p, w) not in maps_assign_pw:
             maps_assign_pw[p, w] = 1
-
-    df_cu = pd.DataFrame.from_records(customers_assignment)
-    df_cu_copy = df_cu.copy()
-    df_cu = df_cu[['配送中心', '客户', '产品', '距离', '客户需求']]
-    df_cu.to_excel(writer, '配送中心到客户分配情况', index=False)
-
-    df_pl = pd.DataFrame.from_records(plants_assignment)
+    df_pl = pd.DataFrame(plants_assignment , columns=['工厂', '配送中心', '产品', '距离', '数量'])
     df_pl_copy = df_pl.copy()
     df_pl = df_pl[['工厂', '配送中心', '产品', '距离', '数量']]
-    df_pl.to_excel(writer, '工厂到配送中心分配情况', index=False)
+    df_pl.to_excel(writer, '配送中心到工厂分配情况', index=False)
+
+    farms_assignment = []
+    maps_assign_fp = {}
+    for (f, p, k) in total_flow_fp.keys():
+        farm = {
+            '农场': f,
+            '农场名称': farms[f][0],
+            '工厂名称': plants[p][1],
+            '状态': farms[f][1],
+            '产品': str(k),
+            '农场所在城市': farms[f][2],
+            '农场所在省份': farms[f][3],
+            '农场总运输量': total_flow_fp[f, p, k],
+            '农场到工厂距离': farm_plant_diatance[f, p]
+        }
+        farms_assignment.append(farm)
+        if (f, p) not in maps_assign_fp:
+            maps_assign_fp[f, p] = 1
+    df_fp = pd.DataFrame(farms_assignment, columns=['农场', '农场名称', '产品', '农场所在城市', '工厂名称', '农场总运输数量', '农场到工厂距离'])
+    df_fp_copy = df_fp.copy()
+    df_fp = df_fp[['农场', '农场名称', '产品', '农场所在城市', '工厂名称', '农场总运输数量', '农场到工厂距离']]
+    df_fp.to_excel(writer, '农场到工厂分配情况', index=False)
+
+
 
     writer.close()
 
-    distance_band_1 = distance_band[0]
-    distance_band_2 = distance_band[1]
-    distance_band_3 = distance_band[2]
-    distance_band_4 = distance_band[3]
-    # 写入每个距离点内的需求百分比
-    total_demand = sum(df_cu['客户需求'])
-    percent_demand_distance_band_1 = sum(
-        df_cu[df_cu['距离'] < distance_band_1]['客户需求']) * 100 / total_demand
-    percent_demand_distance_band_2 = sum(
-        df_cu[df_cu['距离'] < distance_band_2]['客户需求']) * 100 / total_demand
-    percent_demand_distance_band_3 = sum(
-        df_cu[df_cu['距离'] < distance_band_3]['客户需求']) * 100 / total_demand
-    percent_demand_distance_band_4 = sum(
-        df_cu[df_cu['距离'] < distance_band_4]['客户需求']) * 100 / total_demand
-    file.write(
-        "\n {} 公里内需求完成百分比 : {:.1f}".format(distance_band[0], percent_demand_distance_band_1))
-    file.write(
-        "\n {} 公里内需求完成百分比 : {:.1f}".format(distance_band[1], percent_demand_distance_band_2))
-    file.write(
-        "\n {} 公里内需求完成百分比 : {:.1f}".format(distance_band[2], percent_demand_distance_band_3))
-    file.write(
-        "\n {} 公里内需求完成百分比 : {:.1f}".format(distance_band[3], percent_demand_distance_band_4))
 
-    return df_pl_copy, df_cu_copy, df_fa, list_warehouses_open
+    return df_pl_copy, df_cu_copy, df_fa, df_fp_copy, list_warehouses_open, list_farms_open
 
 
 def test_input(farms, warehouses, customers, plants, recycles, products, customer_demands, farm_plant_diatance,
@@ -580,7 +570,7 @@ print("运行时间可能会耗费10~30秒.")
 file = open(scenario_name + '总结文档' + '.txt', "w")
 
 file.write('获得输入数据')
-customers, warehouses, plants, farms, products, recycles, customer_demands, farm_plant_diatance, plant_wh_distance, wh_cust_distance, wh_cus_rot, cus_u_distance = get_data()
+customers, warehouses, plants, farms, products, recycles, customer_demands, plant_product_info, farm_plant_diatance, plant_wh_distance, wh_cust_distance, wh_cus_rot, cus_u_distance = get_data()
 
 for k in products:
     a = ''
@@ -597,7 +587,9 @@ test_input(farms, warehouses, customers, plants, recycles, products, customer_de
            wh_cus_rot, cus_u_distance, distance_band, number_of_whs, plant_product_info)
 
 file.write('\n建立模型')
-df_pl, df_cu, df_fa, wh_loc = optimal_location(number_of_whs, farms, warehouses, customers, plants, products, recycles,
-                                               plant_product_info,
-                                               customer_demands, distance_band, scenario_name)
+df_pl, df_cu, df_fa, df_fp, wh_loc, fa_loc = optimal_location(number_of_whs, farms, warehouses, customers, plants,
+                                                              products,
+                                                              recycles,
+                                                              plant_product_info,
+                                                              customer_demands, distance_band, scenario_name)
 file.close()
